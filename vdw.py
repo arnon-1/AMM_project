@@ -8,10 +8,10 @@ N_particles = 16
 batch_size = 32
 box_length = 50
 
-sigma_step = 0.3 * (2/N_particles)**2    # stddev of Gaussian proposal (distance units)
+sigma_step = 0.3 * (2/N_particles)**2    # arbitrary heuristic for stddev of proposal
 n_steps = 300_000        # total MH steps
-burn_in = 200_000         # burn-in steps (not recorded)
-T_multiplier = 70  # 4*ε / (k_B*T)
+burn_in = 200_000         # burn-in steps (not plotted)
+T_multiplier = 70  # = 4*ε / (k_B*T)
 
 
 def vdw_potential(dist, width=1.0):
@@ -41,48 +41,65 @@ key, subkey = jax.random.split(key)
 split_keys = jax.random.split(key, batch_size)
 pos = jax.random.normal(subkey, (batch_size, N_particles, 3))
 pos %= box_length
-#accept, positions = [], []
 batched_vdw = jax.vmap(all_pairs_vdw)(pos)
 
 
 
-def mh_chain(key, pos0, vdw0, batch_size, n_steps, sigma_step):
+def mh_chain(key, pos0, vdw0, batch_size, n_steps, sigma_step0, adaption_steps=100, target_acceptance=0.3):
     """
     Run a Metropolis–Hastings chain.
 
     key: PRNGKey
     pos0: (N, D) initial positions
     vdw0: scalar energy at pos0 (all_pairs_vdw(pos0))
+    batch_size: not actually used, but it is actually batched
     n_steps: number of MH steps
-    sigma_step: proposal stddev (same shape-broadcast as pos0)
+    sigma_step0: starting proposal stddev (same shape-broadcast as pos0)
+    adaption_steps: number of steps to estimate acceptance for updating stddev
+    target_acceptance: will optimise to this acceptance rate
     """
-    sigma_step = jnp.asarray(sigma_step)
+    sigma_step0 = jnp.asarray(sigma_step0)
+    if n_steps%adaption_steps:
+        raise ValueError("adaption steps not a divisor of total steps")
 
-    def one_step(carry, _):
-        key, pos, vdw = carry
-        key, k_prop, k_u = jax.random.split(key, 3)
+    def adaptive_sigma_step(carry, _):
+        key, pos, vdw, sigma_step = carry
+        def one_step(carry, _):
+            key, pos, vdw = carry
+            key, k_prop, k_u = jax.random.split(key, 3)
 
-        proposal = pos + jax.random.normal(k_prop, pos.shape) * sigma_step
-        proposal = proposal % box_length
-        new_vdw = all_pairs_vdw(proposal)
-        dE = new_vdw - vdw
+            proposal = pos + jax.random.normal(k_prop, pos.shape) * sigma_step
+            proposal = proposal % box_length
+            new_vdw = all_pairs_vdw(proposal)
+            dE = new_vdw - vdw
 
-        # Compare in log-space for numerical stability:
-        log_u = jnp.log(jax.random.uniform(k_u) + 1e-12)
-        accept = log_u < jnp.minimum(0.0, -dE)
+            # Compare in log-space for numerical stability:
+            log_u = jnp.log(jax.random.uniform(k_u) + 1e-12)
+            accept = log_u < jnp.minimum(0.0, -dE)
 
-        pos_next = jnp.where(accept, proposal, pos)
-        vdw_next = jnp.where(accept, new_vdw, vdw)
+            pos_next = jnp.where(accept, proposal, pos)
+            vdw_next = jnp.where(accept, new_vdw, vdw)
 
-        return (key, pos_next, vdw_next), (pos_next, accept)
-    batch_step = jax.vmap(one_step)
+            return (key, pos_next, vdw_next), (pos_next, accept)
+        batch_step = jax.vmap(one_step)
 
-    (key_f, pos_f, vdw_f), (positions, accepts) = lax.scan(
-        batch_step,
-        (key, pos0, vdw0),
+        (key_f, pos_f, vdw_f), (positions, accepts) = lax.scan(
+            batch_step,
+            (key, pos, vdw),
+            xs=None,
+            length=adaption_steps,
+        )
+        accept_chance = accepts.sum()/accepts.size
+        sigma_step = jax.lax.select(accept_chance > target_acceptance, sigma_step*1.1, sigma_step*0.9)
+        return (key_f, pos_f, vdw_f, sigma_step), (positions, accepts)
+
+    (key_f, pos_f, vdw_f, sigma_step), (positions, accepts) = lax.scan(
+        adaptive_sigma_step,
+        (key, pos0, vdw0, sigma_step0),
         xs=None,
-        length=n_steps,
+        length=n_steps//adaption_steps,
     )
+    positions = positions.reshape(n_steps, *positions.shape[2:]).swapaxes(0, 1)
     return positions, accepts
 
 
@@ -90,7 +107,6 @@ positions, accepts = mh_chain(
     split_keys, pos, batched_vdw, batch_size, n_steps, sigma_step
 )
 print(f"done running, average acceptance is {accepts.sum()/accepts.size}")
-positions = jax.numpy.swapaxes(positions, 0, 1)
 
 def _pairwise_distances(frame):
     """All unique pair distances for a single frame (N,3)."""
@@ -103,7 +119,7 @@ def distances_histogram(traj, burn_in=0, stride=10, bins=1000, density=True):
     """
     traj: ndarray, shape (T, N, 3) or (B, T, N, 3)
     burn_in: discard first burn_in steps
-    stride: keep every 'stride' steps after burn-in
+    stride: keep every 'stride' steps after burn-in, lower stride gives nicer plot but takes longer
     """
     traj = np.asarray(traj)
 
@@ -135,4 +151,4 @@ def distances_histogram(traj, burn_in=0, stride=10, bins=1000, density=True):
 
 
 # positions: np.ndarray of shape (T, 64, 3)
-_ = distances_histogram(positions, burn_in=burn_in, stride=10, bins=1000)
+_ = distances_histogram(positions, burn_in=burn_in, stride=20, bins=1000)
