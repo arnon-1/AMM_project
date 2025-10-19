@@ -46,7 +46,7 @@ batched_vdw = jax.vmap(all_pairs_vdw)(pos)
 
 
 
-def mh_chain(key, pos0, vdw0, n_steps, sigma_step):
+def mh_chain(key, pos0, vdw0, batch_size, n_steps, sigma_step):
     """
     Run a Metropolis–Hastings chain.
 
@@ -75,9 +75,10 @@ def mh_chain(key, pos0, vdw0, n_steps, sigma_step):
         vdw_next = jnp.where(accept, new_vdw, vdw)
 
         return (key, pos_next, vdw_next), (pos_next, accept)
+    batch_step = jax.vmap(one_step)
 
     (key_f, pos_f, vdw_f), (positions, accepts) = lax.scan(
-        one_step,
+        batch_step,
         (key, pos0, vdw0),
         xs=None,
         length=n_steps,
@@ -85,17 +86,11 @@ def mh_chain(key, pos0, vdw0, n_steps, sigma_step):
     return positions, accepts
 
 
-mh_chain_batched_shared_sigma = jax.vmap(
-    mh_chain,
-    in_axes=(0, 0, 0, None, None),  # sigma_step shared
-    out_axes=0
-)
-
-
-positions, accepts = mh_chain_batched_shared_sigma(
-    split_keys, pos, batched_vdw, n_steps, sigma_step
+positions, accepts = mh_chain(
+    split_keys, pos, batched_vdw, batch_size, n_steps, sigma_step
 )
 print(f"done running, average acceptance is {accepts.sum()/accepts.size}")
+positions = jax.numpy.swapaxes(positions, 0, 1)
 
 def _pairwise_distances(frame):
     """All unique pair distances for a single frame (N,3)."""
