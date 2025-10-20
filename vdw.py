@@ -35,7 +35,6 @@ def all_pairs_vdw(loc):
     pot = jnp.where(mask, vdw_potential(r), 0.0)
     return jnp.sum(pot)
 
-master_key = jax.random.PRNGKey(0)
 key = jax.random.key(0)
 key, subkey = jax.random.split(key)
 split_keys = jax.random.split(key, batch_size)
