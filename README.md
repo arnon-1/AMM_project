@@ -1,6 +1,6 @@
 This repository contains my code for the Monte Carlo project for the Atomistic Modeling of Materials lecture course.
 
-I should note that this is not my cleanest code.
+The code could use some cleanup, but it should demonstrate the main ideas.
 
 The implementation uses JAX for GPU-accelerated computations. On my laptop, the longest calculation takes only a few seconds.
 
